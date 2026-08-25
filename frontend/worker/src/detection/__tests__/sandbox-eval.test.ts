@@ -345,7 +345,16 @@ describe("runDetectionForTrace", () => {
       stopReason: "toolUse",
     });
 
-    const longSpans = "x".repeat(200_000);
+    // Build realistic, valid JSONL records that exceed the 150k limit
+    // even after field-level compression. We use 100 spans with ~2k chars each.
+    const longSpans = Array.from({ length: 100 }, (_, i) => {
+      return JSON.stringify({
+        span_id: `span-${i}`,
+        status: "OK",
+        input: "x".repeat(2000), // Won't trigger field compression (<= 4000)
+      });
+    }).join("\n");
+
     await runDetectionForTrace({
       traceId: "t",
       spansJsonl: longSpans,
@@ -356,7 +365,13 @@ describe("runDetectionForTrace", () => {
     const ctxArg = mockComplete.mock.calls[0][1] as { messages: { content: string }[] };
     const userMessage = ctxArg.messages[0].content;
     expect(typeof userMessage).toBe("string");
-    expect((userMessage as string).length).toBeLessThan(152_000);
+
+    // The total context length must be strictly constrained by the budget logic
+    expect((userMessage as string).length).toBeLessThanOrEqual(150_000);
+    // Ensure we actually passed in enough data to hit the budget constraint
+    expect(longSpans.length).toBeGreaterThan(150_000);
+    // Ensure the message wasn't just silently dropped to length 0
+    expect((userMessage as string).length).toBeGreaterThan(0);
   });
 
   it("returns error when complete() throws", async () => {
@@ -642,5 +657,30 @@ describe("runDetectionForTrace", () => {
       expect(result.inferenceSource).toBe("system");
       expect(result.inferenceCost).toBeCloseTo(0.002, 6);
     });
+  });
+
+  it("system prompt instructs the judge about truncation receipts", async () => {
+    mockComplete.mockResolvedValueOnce({
+      content: [
+        {
+          type: "toolCall",
+          name: "submit_result",
+          arguments: { identified: false, summary: "ok", data: {} },
+        },
+      ],
+      usage: ZERO_USAGE,
+      stopReason: "toolUse",
+    });
+
+    await runDetectionForTrace({
+      traceId: "t",
+      spansJsonl: "{}",
+      detector: { ...DETECTOR, detectionSource: "system" },
+      workspaceId: "ws-1",
+    });
+
+    const ctxArg = mockComplete.mock.calls[0][1] as { systemPrompt: string };
+    expect(ctxArg.systemPrompt).toContain("_truncated");
+    expect(ctxArg.systemPrompt).toContain("absence of evidence");
   });
 });

@@ -2,6 +2,7 @@ import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
 // complete() goes through the tracing wrapper: inside a detector self-trace
 // scope the call is recorded as a real LLM span; otherwise pure passthrough.
 import { tracedComplete as complete } from "./traced-complete.js";
+import { compressSpansForDetector } from "./compress-spans.js";
 import type { Message, ToolCall, ProviderStreamOptions } from "@earendil-works/pi-ai";
 import {
   findByokKeyForPiProvider,
@@ -190,8 +191,16 @@ RULES:
 - Read the spans carefully.
 - You MUST call the submit_result tool to complete your analysis. Plain text responses are rejected.
 - identified=true means you found the problem. identified=false means the trace is clean.
+- If a line contains "_truncated":true, spans were omitted from context. Do not report the trace as clean based on absence of evidence alone.
 - summary must be one sentence. If identified=true, describe what you found. If false, state why it is clean.
 - data fields are only required when identified=true.`;
+
+  // Compress spans at the field level (truncate oversized fields, strip
+  // base64 payloads) before enforcing the character budget. The hard cap
+  // remains as a safety net.
+  const compressedSpans = compressSpansForDetector(spansJsonl, {
+    budgetChars: SAFETY_TRUNCATE_CHARS,
+  });
 
   const userText = `DETECTOR: ${detector.name}
 
@@ -201,7 +210,7 @@ ${detector.prompt}
 TRACE ID: ${traceId}
 
 SPANS (one JSON object per line):
-${spansJsonl.slice(0, SAFETY_TRUNCATE_CHARS)}`;
+${compressedSpans}`;
 
   // 5. Single-shot complete() with retry-once-on-text-response
   const messages: Message[] = [{ role: "user", content: userText, timestamp: Date.now() }];
